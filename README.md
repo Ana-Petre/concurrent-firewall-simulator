@@ -1,214 +1,121 @@
-# Parallel Firewall
+# Parallel Packet Firewall
 
-## Objectives
+A multithreaded packet firewall implemented in C, built around a shared **ring buffer** and a **producer-consumer** architecture. A single producer thread generates simulated network packets and pushes them into a fixed-size circular buffer; multiple consumer threads pull packets from the buffer, apply filtering logic, and log the accept/drop decision for each one — in the correct chronological order, even though the consumers finish their work non-deterministically.
 
-- Learn how to design and implement parallel programs
-- Get experienced at utilizing the POSIX threading API
-- Learn how to convert a serial program into a parallel one
+## Overview
 
-## Statement
+Instead of processing real network traffic, the firewall works with synthetic packets made up of:
 
-A firewall is a program that checks network packets against a series of filters which provide a decision regarding dropping or allowing the packets to continue to their intended destination.
+- a source (number)
+- a destination (number)
+- a timestamp (number)
+- a payload
 
-**In a real setup**, the network card will receive real packets (e.g. packets having [`Ethernet`](https://en.wikipedia.org/wiki/Ethernet_frame), [`IP`](https://en.wikipedia.org/wiki/IPv4) headers plus payload) from the network and will send them to the firewall for processing.
-The firewall will decide if the packets are to be dropped or not and, if not, passes them further.
+A producer thread creates these packets and inserts them into a shared circular buffer. Consumer threads (the actual firewall workers) pick packets from the buffer, decide whether to **PASS** or **DROP** them, and write the result to a log file.
 
-**In this assignment**, instead of real network packets, we'll deal with made up packets consisting of a made up source (a number), a made up destination (also a number), a timestamp (also a number) and some payload.
-And instead of the network card providing the packets, we'll have a **producer thread** creating these packets.
 
-The created packets will be inserted into a [`circular buffer`](https://en.wikipedia.org/wiki/Circular_buffer), out of which **consumer threads** (which implement the firewall logic) will take packets and process them in order to decide whether they advance to the destination.
+## Acknowledgments
 
-The result of this processing is a log file in which the firewall will record the decision taken (PASS or DROP) for each packet, along with other information such as timestamp.
+This is a solution to the **"Parallel Firewall"** assignment from the Operating Systems course at the **National University of Science and Technology POLITEHNICA Bucharest (UPB)**. The assignment statement, skeleton code, and automated grading/testing infrastructure (`tests/`, `utils/`, `src/serial.c`, `src/packet.c`) were provided by the course staff. Only the ring buffer implementation and consumer thread logic (`src/consumer.c` and related synchronization code) are my own work.
 
-The purpose of this assignment is to:
+---
 
-- implement the circular buffer, along with synchronization mechanisms for it to work in a multithreaded program
+*This project was completed as part of an Operating Systems coursework assignment.*
 
-- implement the consumer threads, which consume packets and process them
+## Key Features
 
-- provide the log file containing the result of the packet processing
+- **Custom ring (circular) buffer** implemented from scratch, with proper synchronization for concurrent access.
+- **Multiple consumer threads** processing packets in parallel — no busy waiting, no polling loops. Threads block and are woken up via condition variables/semaphores.
+- **Deterministic, timestamp-ordered logging**: even though consumers process packets out of order, the log file is written incrementally, sorted by packet timestamp — without a post-processing sort step.
+- **Graceful shutdown**: consumer threads exit cleanly once the producer signals there are no more packets coming.
 
-## Support Code
+## Architecture
 
-The support code consists of the directories:
-
-- `src/` contains the skeleton for the parallelized firewall and the already implemented serial code in `src/serial.c`.
-  You will have to implement the missing parts marked as `TODO`
-
-- `utils/` contains utility files used for debugging and logging.
-
-- `tests/` contains tests used to validate and grade the assignment.
-
-## Implementation
-
-### Firewall Threads
-
-In order to parallelize the firewall we have to distribute the packets to multiple threads.
-The packets will be added to a shared data structure (visible to all threads) by a `producer` thread and processed by multiple `consumer` threads.
-Each `consumer` thread picks a packet from the shared data structure, checks it against the filter function and writes the packet hash together with the drop/accept decision to a log file.
-`consumer` threads stop waiting for new packets from the `producer` thread and exit when the `producer` thread closes the connection to the shared data structure.
-
-The `consumer` threads **must not do any form of busy waiting**.
-When there are new packets that need to be handled, the `consumer` threads must be **notified**.
-**Waiting in a `while()` loop or sleeping is not considered a valid synchronization mechanism and points will be deducted.**
-
-Implement the `consumer` related functions marked with `TODO` in the `src/consumer.c` file.
-**The number of consumer threads will be passed as the 3rd command-line argument**
-
-### Ring Buffers
-
-A ring buffer (or a circular buffer) is a data structure that stores its elements in a circular fixed size array.
-One of the advantages of using such a data structure as opposed to an array is that it acts as a FIFO, without the overhead of moving the elements to the left as they are consumed.
-Thus, the shared ring buffer offers the following fields:
-
-- `write_pos` index in the buffer used by the `producer` thread for appending new packets.
-- `read_pos`  index in the buffer used by the `consumer` threads to pick packets.
-- `cap` the size of the internal buffer.
-- `data` pointer to the internal buffer.
-
-Apart from these fields you have to add synchronization primitives in order to allow multiple threads to access the ring buffer in a deterministic manner.
-You can use mutexes, semaphores, conditional variables and other synchronization mechanisms offered by the `pthread` library.
-
-You will have to implement the following interface for the ring buffer:
-
-- `ring_buffer_init()`: initialize the ring buffer (allocate memory and synchronization primitives).
-- `ring_buffer_enqueue()`: add elements to the ring buffer.
-- `ring_buffer_dequeue()`: remove elements from the ring buffer.
-- `ring_buffer_destroy()`: free up the memory used by the ring_buffer.
-- `ring_buffer_stop()`: finish up using the ring buffer for the calling thread.
-
-### Log File
-
-The output of the firewall will be a log file with the rows containing the firewall's decision, the hash of the packet and its timestamp.
-The actual format can be found in the serial implementation (at `src/serial.c`).
-
-When processing the packets in parallel the threads will finish up the work in a non deterministic order.
-The packet processing functions are already implemented in `src/packet.c`
-
-We would like the logs to be sorted by the packet timestamp, the order that they came in from the producer.
-Thus, the `consumers` should insert the packet information to the log file such as the result is ordered by timestamp.
-The printing format can be found in `./src/serial.c`
-
-The logs must be written to the file in ascending order during packet processing.
-**Sorting the log file after the consumer threads have finished processing is not considered a valid synchronization mechanism and points will be deducted.**
-
-## Operations
-
-### Building
-
-To build both the serial and the parallel versions, run `make` in the `src/` directory:
-
-```console
-student@so:~/.../content/assignments/parallel-firewall$ cd src/
-
-student@so:~/.../assignments/parallel-firewall/src$ make
+```
+Producer Thread                Ring Buffer                 Consumer Threads
+┌──────────────┐          ┌───────────────────┐          ┌──────────────────┐
+│  Generates    │  enqueue │  Fixed-size        │ dequeue  │  Apply filter     │
+│  packets      │ ───────> │  circular array    │ ───────> │  Log PASS/DROP    │
+│               │          │  + sync primitives │          │  (ordered by ts)  │
+└──────────────┘          └───────────────────┘          └──────────────────┘
 ```
 
-That will create the `serial` and `firewall` binaries.
+### Ring Buffer Interface
 
-## Testing and Grading
+| Function                | Purpose                                             |
+|--------------------------|------------------------------------------------------|
+| `ring_buffer_init()`     | Allocates the buffer and synchronization primitives |
+| `ring_buffer_enqueue()`  | Adds a packet to the buffer (producer side)         |
+| `ring_buffer_dequeue()`  | Removes a packet from the buffer (consumer side)    |
+| `ring_buffer_stop()`     | Signals a thread is done using the buffer           |
+| `ring_buffer_destroy()`  | Frees all buffer resources                          |
 
-Testing is automated.
-Tests are located in the `tests/` directory.
+## Project Structure
 
-To test and grade your assignment solution, enter the `tests/` directory and run `grade.sh`.
-
-```console
-student@so:~/.../content/assignments/parallel-firewall$ cd tests/
+```
+.
+├── src/
+│   ├── serial.c       # Reference single-threaded implementation
+│   ├── consumer.c      # Consumer thread logic (main implementation work)
+│   ├── packet.c        # Packet parsing/filtering (provided)
+│   └── ...             # Ring buffer + firewall skeleton
+├── utils/               # Debugging and logging helpers
+└── tests/
+    ├── in/              # Generated test inputs
+    └── grade.sh         # Automated grading script
 ```
 
-```console
-student@so:~/.../content/assignments/parallel-firewall/tests$ ./grade.sh
+## Building
+
+```bash
+cd src/
+make
 ```
 
-Note that this requires linters being available.
-The easiest way to test the project is to use a Docker-based setup with everything installed and configured (see the [README.checker.md](README.checker.md) file for instructions).
+This produces two binaries: `serial` (reference implementation) and `firewall` (the parallel version).
 
-To create the tests, run:
+## Running
 
-```console
-student@so:~/.../content/assignments/parallel-firewall/tests$ make check
+```bash
+./firewall <input_file> <output_file> <number_of_consumers>
 ```
 
-To remove the tests, run:
+Example:
 
-```console
-student@so:~/.../content/assignments/parallel-firewall/tests$ make distclean
+```bash
+./firewall ../tests/in/test_1000.in output.log 4
 ```
 
-When using `grade.sh` you will get a maximum of 90/100 points for general correctness and a maximum of 10/100 points for coding style.
+The output of the parallel `firewall` must match the output of `serial` for the same input.
 
-### Restrictions
+## Testing
 
-- Threads must yield the cpu when waiting for empty/full buffers i.e. not doing `busy waiting`.
-- The logs must be written as they are processed and not after the processing is done, in ascending order by the timestamp.
-- The number of running threads must be at least `num_consumers + 1`, where `num_consumers` is the 3rd command-line argument of the `firewall` binary.
+The project includes an automated checker:
 
-### Grades
-
-- 10 points are awarded for a single consumer solution that also implements the ring buffer
-- 50 points are awarded for a multi consumer solution
-- 30 points are awarded for a multi consumer solution that writes the logs in the sorted manner (bearing in mind the above restrictions)
-
-### Running the Checker
-
-Each test is worth a number of points.
-The maximum grade is `90`.
-
-A successful run will show the output:
-
-```console
-student@so:~/.../assignments/parallel-firewall/tests$ make check
-[...]
-Test [    10 packets, sort False, 1 thread ] ...................... passed ... 3
-Test [ 1,000 packets, sort False, 1 thread ] ...................... passed ... 3
-Test [20,000 packets, sort False, 1 thread ] ...................... passed ... 4
-Test [    10 packets, sort True , 2 threads] ...................... passed ... 5
-Test [    10 packets, sort True , 4 threads] ...................... passed ... 5
-Test [   100 packets, sort True , 2 threads] ...................... passed ... 5
-Test [   100 packets, sort True , 4 threads] ...................... passed ... 5
-Test [ 1,000 packets, sort True , 2 threads] ...................... passed ... 5
-Test [ 1,000 packets, sort True , 4 threads] ...................... passed ... 5
-Test [10,000 packets, sort True , 2 threads] ...................... passed ... 5
-Test [10,000 packets, sort True , 4 threads] ...................... passed ... 5
-Test [20,000 packets, sort True , 2 threads] ...................... passed ... 5
-Test [20,000 packets, sort True , 4 threads] ...................... passed ... 5
-Test [ 1,000 packets, sort False, 4 threads] ...................... passed ... 5
-Test [ 1,000 packets, sort False, 8 threads] ...................... passed ... 5
-Test [10,000 packets, sort False, 4 threads] ...................... passed ... 5
-Test [10,000 packets, sort False, 8 threads] ...................... passed ... 5
-Test [20,000 packets, sort False, 4 threads] ...................... passed ... 5
-Test [20,000 packets, sort False, 8 threads] ...................... passed ... 5
-
-Checker:                                                                    90/100
+```bash
+cd tests/
+make check      # generate and run all tests
+./grade.sh       # run the grading script
+make lint        # run style linters (checkpatch.pl, cpplint, shellcheck)
+make distclean   # remove generated test files
 ```
 
-### Running the Linters
+Grading breakdown:
 
-To run the linters, use the `make lint` command in the `tests/` directory:
+- **10 pts** — single-consumer solution with a working ring buffer
+- **50 pts** — correct multi-consumer solution
+- **30 pts** — multi-consumer solution with correctly timestamp-ordered logs
+- **10 pts** — code style (linters)
 
-```console
-student@so:~/.../assignments/parallel-firewall/tests$ make lint
-[...]
-cd .. && checkpatch.pl -f checker/*.sh tests/*.sh
-[...]
-cd .. && cpplint --recursive src/ tests/ checker/
-[...]
-cd .. && shellcheck checker/*.sh tests/*.sh
-```
+## Synchronization Constraints
 
-Note that the linters have to be installed on your system: [`checkpatch.pl`](https://.com/torvalds/linux/blob/master/scripts/checkpatch.pl), [`cpplint`](https://github.com/cpplint/cpplint), [`shellcheck`](https://www.shellcheck.net/).
-They also need to have certain configuration options.
-It's easiest to run them in a Docker-based setup with everything configured.
+- Threads must **block/yield**, not busy-wait, while the buffer is empty or full.
+- Logs must be written **as packets are processed**, already in ascending timestamp order — sorting after the fact is not allowed.
+- At least `num_consumers + 1` threads must be running at all times (consumers + producer).
 
-### Fine-Grained Testing
+## Tech Stack
 
-Input tests cases are located in `tests/in/` and are generated by the checker.
-The expected results are generated by the checker while running the serial implementation.
-If you want to run a single test, use the below commands while in the `src/` directory:
+- C
+- POSIX threads (`pthread`) — mutexes, condition variables / semaphores
 
-```console
-student@so:~/.../assignments/parallel-firewall/src$ ./firewall ../tests/in/test_<num_packets>.in <output_file> <number_of_consumers>
-```
 
-Results provided by the serial and parallel implementation must be the same for the test to successfully pass.
